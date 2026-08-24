@@ -8,7 +8,7 @@
 
     var manifest = {
         type: 'other',
-        version: '1.0.0',
+        version: '1.1.0',
         name: 'Случайное',
         description: 'Случайный фильм или сериал: кнопки в шапке, экран с фильтрами и кнопка трейлера на YouTube',
         component: 'random_picker'
@@ -68,6 +68,10 @@
 
     let queue = [];
     let context = null;
+    // Чем повторить последний случайный выбор. Живёт до ближайшей открытой
+    // карточки: она забирает его себе на кнопку «Ещё» и обнуляет, чтобы кнопка
+    // не появлялась на карточках, открытых обычным способом.
+    let random_repeat = null;
 
     // Загруженная страница переживает клики: карточки раздаются по одной,
     // так что в сеть ходим раз на 20 нажатий. Размер каталога спрашиваем
@@ -100,6 +104,12 @@
             font-size: 1.2em; font-weight: 600; background-color: rgba(255, 255, 255, 0.14);
         }
         .random-screen__go.focus { background-color: #fff; color: #000; }
+        .random-more {
+            margin-top: 1.2em; padding: 1em 1.2em; border-radius: 0.6em;
+            text-align: center; font-weight: 600;
+            background-color: rgba(255, 255, 255, 0.14);
+        }
+        .random-more.focus { background-color: #fff; color: #000; }
     `;
 
     // Родные спрайты Lampa: свои контурные иконки выбивались из ряда, где все
@@ -356,6 +366,8 @@
     }
 
     function pickRandom(type) {
+        random_repeat = () => pickRandom(type);
+
         discoverRandom(type, menuFilters(type === 'tv'), () => {
             Lampa.Noty.show('Ничего не нашлось, попробуйте ослабить фильтры');
         });
@@ -364,6 +376,8 @@
     // Кнопка в шапке: внутри списка — случайное из него, иначе из всего каталога
     function runRandom(method) {
         console.log('Lampa Random: Triggered ->', method);
+
+        random_repeat = () => runRandom(method);
 
         updateQueue();
 
@@ -573,6 +587,25 @@
         else container.prepend(button);
     }
 
+    // Кнопка под постером: пришли сюда «покрутить», а не смотреть, поэтому она
+    // же и забирает фокус. Вправо с неё Lampa уводит на «Смотреть» сама — по
+    // расположению на экране.
+    function addMoreButton(repeat) {
+        const active = Lampa.Activity.active();
+        if (!active || !active.activity) return;
+
+        const root = active.activity.render();
+        const left = root.find('.full-start-new__left, .full-start__left');
+        if (!left.length || left.find('.random-more').length) return;
+
+        const button = $('<div class="selector random-more">Ещё случайное</div>');
+        button.on('hover:enter', repeat);
+        left.append(button);
+
+        Lampa.Controller.collectionSet(root);
+        Lampa.Controller.collectionFocus(button[0], root);
+    }
+
     function addMenuItem() {
         const list = document.querySelector('.menu .menu__list');
         if (!list || document.getElementById('lampa-random-menu')) return;
@@ -641,7 +674,13 @@
 
         // 'complite' — опечатка самой Lampa, событие приходит именно так
         Lampa.Listener.follow('full', (e) => {
-            if (e.type === 'complite') addTrailerButton();
+            if (e.type !== 'complite') return;
+
+            addTrailerButton();
+
+            const repeat = random_repeat;
+            random_repeat = null;
+            if (repeat) addMoreButton(repeat);
         });
 
         console.log('Lampa Random: plugin v' + manifest.version + ' ready');
