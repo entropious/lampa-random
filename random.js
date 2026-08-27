@@ -8,7 +8,7 @@
 
     var manifest = {
         type: 'other',
-        version: '1.1.0',
+        version: '1.2.0',
         name: 'Случайное',
         description: 'Случайный фильм или сериал: кнопки в шапке, экран с фильтрами и кнопка трейлера на YouTube',
         component: 'random_picker'
@@ -65,6 +65,13 @@
     const RATINGS = { '0': 'Любой', '5': 'от 5', '6': 'от 6', '7': 'от 7', '8': 'от 8' };
 
     const TYPES = { 'movie': 'Фильмы', 'tv': 'Сериалы' };
+
+    // Где искать. Избранное лежит локально целыми карточками, так что выбор из
+    // него идёт без сети.
+    const SOURCES = { 'catalog': 'Весь каталог', 'favorite': 'Избранное' };
+    // «Смотрю», «Закладки» и «Позже». Просмотренное, брошенное и история сюда
+    // не входят: это не «хочу посмотреть».
+    const FAVORITE_LISTS = ['look', 'book', 'wath'];
 
     let queue = [];
     let context = null;
@@ -132,6 +139,16 @@
 
     function stored(name, fallback) {
         return String(Lampa.Storage.get(name, fallback) || fallback);
+    }
+
+    // Раньше источником мог быть отдельный список избранного. Приводим такое
+    // значение к «favorite», иначе экран показывал бы одно, а искал в другом.
+    function sourceValue() {
+        const saved = stored('random_source', 'catalog');
+        const value = saved === 'catalog' ? 'catalog' : 'favorite';
+
+        if (value !== saved) Lampa.Storage.set('random_source', value);
+        return value;
     }
 
     // Каталог от перезагрузки к перезагрузке тот же, так что пул переживает
@@ -365,10 +382,59 @@
         return { genre: '0', year_from: '0', year_to: '0', rating: '0' };
     }
 
+    // Случайное из избранного. Карточки там лежат целиком, поэтому фильтры
+    // применяем на месте — в отличие от каталога, где этим занимается TMDB.
+    function pickFromFavorite(type, filters) {
+        const all = Lampa.Favorite.all() || {};
+
+        const seen = {};
+        const items = [];
+
+        FAVORITE_LISTS.forEach(list => {
+            (all[list] || []).forEach(item => {
+                if (!item || !item.id || seen[item.id]) return;
+                seen[item.id] = true;
+                items.push(item);
+            });
+        });
+
+        if (!items.length) return Lampa.Noty.show('В избранном пусто');
+
+        const suitable = items.filter(item => {
+            if (getMethod(item) !== type) return false;
+
+            if (filters.genre !== '0') {
+                const genres = item.genre_ids || [];
+                if (genres.indexOf(Number(filters.genre)) === -1) return false;
+            }
+
+            const year = Number(String(item.release_date || item.first_air_date || '').slice(0, 4));
+            if (filters.year_from !== '0' && (!year || year < Number(filters.year_from))) return false;
+            if (filters.year_to !== '0' && (!year || year > Number(filters.year_to))) return false;
+
+            if (filters.rating !== '0' && (item.vote_average || 0) < Number(filters.rating)) return false;
+
+            return true;
+        });
+
+        if (!suitable.length) {
+            return Lampa.Noty.show('В избранном ничего не подошло под фильтры');
+        }
+
+        console.log('Lampa Random: From favorite,', suitable.length, 'of', items.length, 'fit');
+        navigateTo(suitable[Math.floor(Math.random() * suitable.length)]);
+    }
+
     function pickRandom(type) {
         random_repeat = () => pickRandom(type);
 
-        discoverRandom(type, menuFilters(type === 'tv'), () => {
+        const filters = menuFilters(type === 'tv');
+
+        // Избранное человек отбирал руками, поэтому дефолтные пороги года и
+        // оценки к нему не применяем — только то, что выбрано явно.
+        if (sourceValue() === 'favorite') return pickFromFavorite(type, filters);
+
+        discoverRandom(type, filters, () => {
             Lampa.Noty.show('Ничего не нашлось, попробуйте ослабить фильтры');
         });
     }
@@ -452,8 +518,10 @@
     // функция, а не готовый объект.
     function screenFields() {
         const is_tv = stored('random_type', 'movie') === 'tv';
+        sourceValue();
         return [
             { key: 'random_type', title: 'Тип', values: TYPES, fallback: 'movie' },
+            { key: 'random_source', title: 'Где искать', values: SOURCES, fallback: 'catalog' },
             { key: is_tv ? 'random_genre_tv' : 'random_genre_movie', title: 'Жанр', values: is_tv ? GENRES_TV : GENRES_MOVIE, fallback: '0' },
             { key: 'random_year_from', title: 'Год: с', values: YEARS_FROM, fallback: '0' },
             { key: 'random_year_to', title: 'Год: по', values: YEARS_TO, fallback: '0' },
