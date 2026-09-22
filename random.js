@@ -1,10 +1,245 @@
+// Собрано build.py из lampa/core.js и plugins/random/plugin.js.
+// Правки вносятся в исходники, этот файл перезаписывается.
+// Общая обвязка для плагинов Lampa: запуск, манифест, стили, доступ к открытой
+// карточке фильма и сеть. Файл вклеивается в начало каждого плагина сборкой
+// (build.py), так что в рантайме он уже часть плагина и отдельным запросом не
+// тянется.
 (function () {
     'use strict';
 
-    // Плагин может приехать дважды: и как расширение браузера, и из списка
-    // плагинов Lampa. Второй раз просто выходим.
-    if (window.lampa_random_plugin) return;
-    window.lampa_random_plugin = true;
+    // Два собранных плагина несут по своей копии ядра. Первая выигрывает —
+    // API у них одинаковое, а двойное определение ничего не даёт.
+    if (window.LampaCore) return;
+
+    var Core = {};
+
+    // Lampa поднимается не мгновенно, а как расширение браузера плагин
+    // выполняется вообще раньше страницы. Ждём готовности обоих.
+    function waitForLampa(attempt, ready, giveup) {
+        var available = typeof Lampa !== 'undefined' && Lampa.Storage && Lampa.Component &&
+            Lampa.Activity && Lampa.Controller && Lampa.Listener && typeof window.$ === 'function';
+
+        if (available) {
+            if (window.appready) return ready();
+
+            return Lampa.Listener.follow('app', function (e) {
+                if (e.type === 'ready') ready();
+            });
+        }
+
+        if (attempt > 300) return giveup();
+
+        setTimeout(function () { waitForLampa(attempt + 1, ready, giveup); }, 200);
+    }
+
+    // Часть плагинов кладёт в Manifest.plugins объект, часть — массив. Приводим
+    // к массиву: иначе второй установленный плагин затирает запись первого, и
+    // тот пропадает из списка расширений.
+    function registerManifest(manifest) {
+        if (!Array.isArray(Lampa.Manifest.plugins)) {
+            Lampa.Manifest.plugins = Lampa.Manifest.plugins ? [Lampa.Manifest.plugins] : [];
+        }
+
+        var known = Lampa.Manifest.plugins.some(function (plugin) {
+            return plugin && plugin.name === manifest.name;
+        });
+
+        if (!known) Lampa.Manifest.plugins.push(manifest);
+    }
+
+    // options: { flag, manifest, styles: { id, css }, start }
+    Core.boot = function (options) {
+        // Плагин может приехать дважды: и как расширение браузера, и из списка
+        // плагинов Lampa. Второй раз просто выходим.
+        if (window[options.flag]) return;
+        window[options.flag] = true;
+
+        waitForLampa(0, function () {
+            registerManifest(options.manifest);
+            if (options.styles) Core.addStyles(options.styles.id, options.styles.css);
+            options.start();
+        }, function () {
+            console.error(options.manifest.name + ': Lampa так и не появилась, сдаёмся');
+        });
+    };
+
+    Core.addStyles = function (id, css) {
+        if (document.getElementById(id)) return;
+
+        var style = document.createElement('style');
+        style.id = id;
+        style.textContent = css;
+        document.head.appendChild(style);
+    };
+
+    Core.stored = function (name, fallback) {
+        return String(Lampa.Storage.get(name, fallback) || fallback);
+    };
+
+    // Разные источники зовут тип по-разному, а часть карточек не несёт его
+    // вовсе — тогда опознаём по полям, которые есть только у сериалов.
+    Core.cardMethod = function (data) {
+        if (!data) return 'movie';
+        if (data.method === 'movie' || data.method === 'tv') return data.method;
+        if (data.media_type === 'movie' || data.media_type === 'tv') return data.media_type;
+        if (data.type === 'movie' || data.type === 'tv') return data.type;
+        return (data.number_of_seasons || data.first_air_date || data.name) ? 'tv' : 'movie';
+    };
+
+    Core.cardYear = function (card) {
+        var year = Number(String((card && (card.release_date || card.first_air_date)) || '').slice(0, 4));
+        return year || 0;
+    };
+
+    Core.cardTitle = function (card) {
+        return (card && (card.title || card.name || card.original_title || card.original_name)) || '';
+    };
+
+    // Открытая карточка целиком: сама запись, её тип и корень активности.
+    // Искать по документу нельзя — прошлые карточки остаются в DOM, и запрос
+    // вернёт кнопки фильма, который человек уже закрыл.
+    function currentCard() {
+        var active = Lampa.Activity.active();
+        var card = active && active.card;
+
+        if (!card || !card.id || !active.activity) return null;
+
+        var method = (active.method === 'movie' || active.method === 'tv')
+            ? active.method
+            : Core.cardMethod(card);
+
+        return { card: card, method: method, render: active.activity.render(), activity: active.activity };
+    }
+
+    Core.currentCard = currentCard;
+
+    // 'complite' — опечатка самой Lampa, событие приходит именно так
+    Core.onFullCard = function (callback) {
+        Lampa.Listener.follow('full', function (e) {
+            if (e.type !== 'complite') return;
+
+            var ctx = currentCard();
+            if (ctx) callback(ctx);
+        });
+    };
+
+    // Свежие сборки Lampa разметили карточку заново, старые ещё живут со
+    // старыми классами — ищем по обоим.
+    Core.cardButtons = function (ctx) {
+        return ctx.render.find('.full-start-new__buttons, .full-start__buttons');
+    };
+
+    Core.cardLeft = function (ctx) {
+        return ctx.render.find('.full-start-new__left, .full-start__left');
+    };
+
+    // Кнопка в ряду под постером. Разметку копируем у родных кнопок: Lampa сама
+    // и стилизует её, и прячет подпись у второстепенных.
+    // options: { className, icon, title, onEnter, after }
+    Core.cardButton = function (ctx, options) {
+        var container = Core.cardButtons(ctx);
+        if (!container.length || container.find('.' + options.className).length) return null;
+
+        var button = $(
+            '<div class="full-start__button selector ' + options.className + '">' +
+            (options.icon || '') +
+            '<span>' + (options.title || '') + '</span>' +
+            '</div>'
+        );
+
+        button.on('hover:enter', options.onEnter);
+
+        var anchor = options.after ? container.find(options.after) : $();
+        if (anchor.length) button.insertAfter(anchor.first());
+        else container.prepend(button);
+
+        return button;
+    };
+
+    // Строка вроде «сезон · серия» под названием. Кладём её туда же, куда
+    // Lampa кладёт свои детали, чтобы она не висела отдельным блоком.
+    Core.cardDetails = function (ctx, className, html) {
+        var line = ctx.render.find('.' + className);
+
+        if (!line.length) {
+            line = $('<div class="full-start-new__details ' + className + '"></div>');
+
+            var rate = ctx.render.find('.full-start-new__rate-line');
+            var details = ctx.render.find('.full-start-new__details').not('.' + className);
+            var left = Core.cardLeft(ctx);
+
+            if (rate.length) line.insertAfter(rate.first());
+            else if (details.length) line.insertAfter(details.first());
+            else if (left.length) left.append(line);
+            else return null;
+        }
+
+        line.html(html);
+        return line;
+    };
+
+    function encodeBody(options) {
+        if (options.form) {
+            return Object.keys(options.form).map(function (name) {
+                return encodeURIComponent(name) + '=' + encodeURIComponent(options.form[name]);
+            }).join('&');
+        }
+
+        return options.body === undefined ? null : JSON.stringify(options.body);
+    }
+
+    // Свой XHR, а не Lampa.Reguest: тому нельзя передать заголовки, а без
+    // Authorization запрос к чужому API не пройдёт. TMDB по-прежнему ходит
+    // через Lampa.Reguest — там важны пользовательские настройки прокси.
+    // Тело задаётся либо `body` (уедет как json), либо `form` (как
+    // application/x-www-form-urlencoded, чего требуют эндпоинты OAuth).
+    // options: { url, method, headers, body, form, timeout, onDone, onFail }
+    Core.request = function (options) {
+        var xhr = new XMLHttpRequest();
+        var headers = options.headers || {};
+
+        xhr.open(options.method || 'GET', options.url, true);
+        Object.keys(headers).forEach(function (name) {
+            xhr.setRequestHeader(name, headers[name]);
+        });
+        xhr.timeout = options.timeout || 15000;
+
+        function fail(status, body) {
+            if (options.onFail) options.onFail(status, body);
+        }
+
+        xhr.onload = function () {
+            var parsed = null;
+
+            try {
+                if (xhr.responseText) parsed = JSON.parse(xhr.responseText);
+            } catch (e) {
+                // Тело не json — для успешного ответа это нормально (204),
+                // для ошибки разбирать всё равно нечего.
+            }
+
+            if (xhr.status >= 200 && xhr.status < 300) {
+                if (options.onDone) options.onDone(parsed, xhr.status);
+            } else {
+                fail(xhr.status, parsed);
+            }
+        };
+
+        xhr.onerror = function () { fail(0, null); };
+        xhr.ontimeout = function () { fail(0, null); };
+
+        xhr.send(encodeBody(options));
+
+        return xhr;
+    };
+
+    window.LampaCore = Core;
+})();
+
+(function () {
+    'use strict';
+
+    var Core = window.LampaCore;
 
     var manifest = {
         type: 'other',
@@ -137,9 +372,7 @@
         return copy;
     }
 
-    function stored(name, fallback) {
-        return String(Lampa.Storage.get(name, fallback) || fallback);
-    }
+    var stored = Core.stored;
 
     // Раньше источником мог быть отдельный список избранного. Приводим такое
     // значение к «favorite», иначе экран показывал бы одно, а искал в другом.
@@ -234,12 +467,7 @@
         }
     }
 
-    function getMethod(data) {
-        if (data.method === 'movie' || data.method === 'tv') return data.method;
-        if (data.media_type === 'movie' || data.media_type === 'tv') return data.media_type;
-        if (data.type === 'movie' || data.type === 'tv') return data.type;
-        return (data.number_of_seasons || data.first_air_date) ? 'tv' : 'movie';
-    }
+    var getMethod = Core.cardMethod;
 
     function navigateTo(data) {
         if (!data || !data.id) return;
@@ -629,49 +857,29 @@
         if (!opened) Lampa.Noty.show('Не удалось открыть YouTube');
     }
 
-    function addTrailerButton() {
-        const active = Lampa.Activity.active();
-        const card = active && active.card;
-        if (!card || !card.id || !active.activity) return;
-
-        // Только внутри текущей активности: прошлые карточки остаются в DOM,
-        // и поиск по документу попадает в кнопки чужого фильма.
-        const container = active.activity.render().find('.full-start-new__buttons, .full-start__buttons');
-        if (!container.length || container.find('.button--youtube-trailer').length) return;
-
-        const method = active.method === 'tv' || card.name ? 'tv' : 'movie';
-
-        const button = $(
-            '<div class="full-start__button selector button--youtube-trailer">' +
-            '<svg><use xlink:href="#sprite-youtube"></use></svg>' +
-            '<span>Трейлер</span>' +
-            '</div>'
-        );
-
-        button.on('hover:enter', () => englishTitle(card, method, openYoutubeSearch));
-
-        const play = container.find('.button--play');
-        if (play.length) button.insertAfter(play);
-        else container.prepend(button);
+    function addTrailerButton(ctx) {
+        Core.cardButton(ctx, {
+            className: 'button--youtube-trailer',
+            icon: '<svg><use xlink:href="#sprite-youtube"></use></svg>',
+            title: 'Трейлер',
+            after: '.button--play',
+            onEnter: () => englishTitle(ctx.card, ctx.method, openYoutubeSearch)
+        });
     }
 
     // Кнопка под постером: пришли сюда «покрутить», а не смотреть, поэтому она
     // же и забирает фокус. Вправо с неё Lampa уводит на «Смотреть» сама — по
     // расположению на экране.
-    function addMoreButton(repeat) {
-        const active = Lampa.Activity.active();
-        if (!active || !active.activity) return;
-
-        const root = active.activity.render();
-        const left = root.find('.full-start-new__left, .full-start__left');
+    function addMoreButton(ctx, repeat) {
+        const left = Core.cardLeft(ctx);
         if (!left.length || left.find('.random-more').length) return;
 
         const button = $('<div class="selector random-more">Ещё случайное</div>');
         button.on('hover:enter', repeat);
         left.append(button);
 
-        Lampa.Controller.collectionSet(root);
-        Lampa.Controller.collectionFocus(button[0], root);
+        Lampa.Controller.collectionSet(ctx.render);
+        Lampa.Controller.collectionFocus(button[0], ctx.render);
     }
 
     function addMenuItem() {
@@ -716,19 +924,7 @@
         });
     }
 
-    function addStyles() {
-        if (document.getElementById('lampa-random-styles')) return;
-
-        const style = document.createElement('style');
-        style.id = 'lampa-random-styles';
-        style.textContent = STYLES;
-        document.head.appendChild(style);
-    }
-
     function startPlugin() {
-        Lampa.Manifest.plugins = manifest;
-
-        addStyles();
         loadCache();
         Lampa.Component.add('random_picker', RandomScreen);
 
@@ -740,41 +936,21 @@
             addHeadButtons();
         }, 1000);
 
-        // 'complite' — опечатка самой Lampa, событие приходит именно так
-        Lampa.Listener.follow('full', (e) => {
-            if (e.type !== 'complite') return;
-
-            addTrailerButton();
+        Core.onFullCard((ctx) => {
+            addTrailerButton(ctx);
 
             const repeat = random_repeat;
             random_repeat = null;
-            if (repeat) addMoreButton(repeat);
+            if (repeat) addMoreButton(ctx, repeat);
         });
 
         console.log('Lampa Random: plugin v' + manifest.version + ' ready');
     }
 
-    // Как плагин файл грузится уже в готовое приложение, а как расширение
-    // браузера — раньше, чем страница поднимет Lampa. Поддерживаем оба случая.
-    function waitForLampa(attempt) {
-        const ready = typeof Lampa !== 'undefined' && Lampa.Storage && Lampa.Component &&
-            Lampa.Activity && Lampa.Controller && Lampa.Listener && typeof window.$ === 'function';
-
-        if (ready) {
-            if (window.appready) return startPlugin();
-
-            return Lampa.Listener.follow('app', (e) => {
-                if (e.type === 'ready') startPlugin();
-            });
-        }
-
-        if (attempt > 300) {
-            console.error('Lampa Random: Lampa never became available, giving up');
-            return;
-        }
-
-        setTimeout(() => waitForLampa(attempt + 1), 200);
-    }
-
-    waitForLampa(0);
+    Core.boot({
+        flag: 'lampa_random_plugin',
+        manifest: manifest,
+        styles: { id: 'lampa-random-styles', css: STYLES },
+        start: startPlugin
+    });
 })();
