@@ -853,6 +853,15 @@
         const url = 'https://www.youtube.com/results?search_query=' + encodeURIComponent(query + ' trailer');
         console.log('Lampa Random: Opening YouTube ->', query + ' trailer');
 
+        // В Android-приложении window.open открывает страницу во встроенном
+        // WebView, где у плеера YouTube не работает полноэкранный режим.
+        // Отдаём ссылку системе: откроется приложение YouTube или браузер.
+        if (Lampa.Platform.is('android') && typeof AndroidJS !== 'undefined' &&
+            typeof AndroidJS.openBrowser === 'function') {
+            AndroidJS.openBrowser(url);
+            return;
+        }
+
         const opened = window.open(url, '_blank');
         if (!opened) Lampa.Noty.show('Не удалось открыть YouTube');
     }
