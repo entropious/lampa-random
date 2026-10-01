@@ -243,7 +243,7 @@
 
     var manifest = {
         type: 'other',
-        version: '1.2.2',
+        version: '1.2.3',
         name: 'Случайное',
         description: 'Случайный фильм или сериал: кнопки в шапке, экран с фильтрами и кнопка трейлера на YouTube',
         component: 'random_picker'
@@ -884,19 +884,20 @@
     }
 
     function openTrailer(card, method) {
-        const android = androidJS();
-
-        // На Android отдаём системе ссылку на сам ролик, как это делает Lampa
-        // со своими трейлерами: её открывает приложение YouTube, в том числе
-        // на Android TV, где нет браузера и ссылку на поиск открыть нечем.
-        if (android && typeof android.openYoutube === 'function') {
+        // На Android трейлер играет встроенный плеер Lampa: ролики YouTube он
+        // всегда открывает у себя, на весь экран, как трейлеры самой Lampa.
+        // Ссылки наружу на части телефонов открыть нечем, а window.open грузит
+        // YouTube в WebView поверх Lampa, где не работает полный экран.
+        if (androidJS()) {
             tmdbTrailerId(card, method, (id) => {
-                if (id) {
-                    console.log('Lampa Random: Opening YouTube video ->', id);
-                    android.openYoutube(id);
-                } else {
-                    englishTitle(card, method, openYoutubeSearch);
-                }
+                if (!id) return englishTitle(card, method, openYoutubeSearch);
+
+                console.log('Lampa Random: Playing YouTube trailer ->', id);
+                Lampa.Player.play({
+                    title: card.title || card.name,
+                    url: 'https://www.youtube.com/watch?v=' + id,
+                    youtube: true
+                });
             });
             return;
         }
