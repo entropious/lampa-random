@@ -243,7 +243,7 @@
 
     var manifest = {
         type: 'other',
-        version: '1.2.3',
+        version: '1.3.0',
         name: 'Случайное',
         description: 'Случайный фильм или сериал: кнопки в шапке, экран с фильтрами и кнопка трейлера на YouTube',
         component: 'random_picker'
@@ -853,29 +853,17 @@
         return typeof AndroidJS !== 'undefined' ? AndroidJS : null;
     }
 
-    // Трейлер с YouTube из TMDB: сначала английские ролики, потом любые.
-    function tmdbTrailerId(card, method, callback) {
-        const url = Lampa.TMDB.api(method + '/' + card.id + '/videos' +
-            '?api_key=' + Lampa.TMDB.key() + '&include_video_language=en,null,ru');
-
-        new Lampa.Reguest().silent(url, (data) => {
-            const videos = (data.results || []).filter((v) => v.site === 'YouTube' && v.key);
-            const pick = videos.find((v) => v.type === 'Trailer' && v.iso_639_1 === 'en') ||
-                videos.find((v) => v.type === 'Trailer') || videos[0];
-            callback(pick ? pick.key : null);
-        }, () => callback(null));
-    }
-
+    // Страница поиска YouTube: запасной вариант, когда список не получили.
     function openYoutubeSearch(query) {
-        const url = 'https://www.youtube.com/results?search_query=' + encodeURIComponent(query + ' trailer');
-        console.log('Lampa Random: Opening YouTube ->', query + ' trailer');
+        const url = 'https://www.youtube.com/results?search_query=' + encodeURIComponent(query);
+        console.log('Lampa Random: Opening YouTube ->', query);
 
         // В Android-приложении window.open грузит страницу в тот же WebView,
         // поверх самой Lampa, и полный экран у YouTube там не работает.
         const android = androidJS();
         if (android) {
             if (typeof android.openBrowser === 'function') android.openBrowser(url);
-            else Lampa.Noty.show('Трейлер не найден');
+            else Lampa.Noty.show('Не удалось найти трейлеры');
             return;
         }
 
@@ -883,26 +871,76 @@
         if (!opened) Lampa.Noty.show('Не удалось открыть YouTube');
     }
 
-    function openTrailer(card, method) {
-        // На Android трейлер играет встроенный плеер Lampa: ролики YouTube он
-        // всегда открывает у себя, на весь экран, как трейлеры самой Lampa.
-        // Ссылки наружу на части телефонов открыть нечем, а window.open грузит
-        // YouTube в WebView поверх Lampa, где не работает полный экран.
-        if (androidJS()) {
-            tmdbTrailerId(card, method, (id) => {
-                if (!id) return englishTitle(card, method, openYoutubeSearch);
+    // Поиск через внутренний API YouTube (youtubei), тот же, что у сайта; ключ
+    // не нужен. Браузер его не пустит из-за CORS, поэтому запрос нативный: на
+    // Android его делает приложение. Вне Android он упадёт, и откроется
+    // страница поиска.
+    function youtubeSearch(query, callback, error) {
+        const body = JSON.stringify({
+            context: { client: { clientName: 'WEB', clientVersion: '2.20250101.00.00', hl: 'en', gl: 'US' } },
+            query: query,
+            params: 'EgIQAQ==' // только видео
+        });
 
-                console.log('Lampa Random: Playing YouTube trailer ->', id);
-                Lampa.Player.play({
-                    title: card.title || card.name,
-                    url: 'https://www.youtube.com/watch?v=' + id,
-                    youtube: true
-                });
+        new Lampa.Reguest().native('https://www.youtube.com/youtubei/v1/search?prettyPrint=false', (data) => {
+            if (typeof data === 'string') {
+                try { data = JSON.parse(data); } catch (e) { return error(); }
+            }
+
+            const found = [];
+            const walk = (node) => {
+                if (!node || typeof node !== 'object') return;
+                if (node.videoRenderer) found.push(node.videoRenderer);
+                for (const key in node) walk(node[key]);
+            };
+            walk(data && data.contents);
+
+            const text = (t) => t ? (t.simpleText || (t.runs || []).map((r) => r.text).join('')) : '';
+            const videos = found.filter((v) => v.videoId).map((v) => ({
+                id: v.videoId,
+                title: text(v.title),
+                channel: text(v.ownerText || v.longBylineText),
+                length: text(v.lengthText),
+                published: text(v.publishedTimeText)
+            }));
+
+            if (videos.length) callback(videos);
+            else error();
+        }, error, body, { timeout: 15000, headers: { 'Content-Type': 'application/json' } });
+    }
+
+    function showTrailers(title, videos) {
+        const items = videos.map((v) => ({
+            title: Lampa.Utils.shortText(v.title, 70),
+            subtitle: [v.channel, v.length, v.published].filter(Boolean).join(' · '),
+            url: 'https://www.youtube.com/watch?v=' + v.id,
+            youtube: true,
+            template: 'selectbox_icon',
+            icon: '<img class="size-youtube" src="https://img.youtube.com/vi/' + v.id + '/default.jpg" />',
+            thumbnail: 'https://img.youtube.com/vi/' + v.id + '/default.jpg'
+        }));
+
+        Lampa.Select.show({
+            title: 'YouTube - ' + title,
+            items: items,
+            // Ролики YouTube Lampa всегда играет своим плеером, на весь экран.
+            onSelect: (item) => {
+                Lampa.Player.play(item);
+                Lampa.Player.playlist(items);
+            },
+            onBack: () => Lampa.Controller.toggle('content')
+        });
+    }
+
+    function openTrailers(card, method) {
+        englishTitle(card, method, (title) => {
+            const query = title + ' trailer';
+
+            youtubeSearch(query, (videos) => showTrailers(title, videos), () => {
+                console.log('Lampa Random: YouTube search failed, opening page');
+                openYoutubeSearch(query);
             });
-            return;
-        }
-
-        englishTitle(card, method, openYoutubeSearch);
+        });
     }
 
     function addTrailerButton(ctx) {
@@ -911,7 +949,7 @@
             icon: '<svg><use xlink:href="#sprite-youtube"></use></svg>',
             title: 'Трейлер',
             after: '.button--play',
-            onEnter: () => openTrailer(ctx.card, ctx.method)
+            onEnter: () => openTrailers(ctx.card, ctx.method)
         });
     }
 
