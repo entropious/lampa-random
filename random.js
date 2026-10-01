@@ -243,7 +243,7 @@
 
     var manifest = {
         type: 'other',
-        version: '1.2.1',
+        version: '1.2.2',
         name: 'Случайное',
         description: 'Случайный фильм или сериал: кнопки в шапке, экран с фильтрами и кнопка трейлера на YouTube',
         component: 'random_picker'
@@ -872,10 +872,10 @@
 
         // В Android-приложении window.open грузит страницу в тот же WebView,
         // поверх самой Lampa, и полный экран у YouTube там не работает.
-        // Отдаём ссылку системе: откроется приложение YouTube или браузер.
         const android = androidJS();
-        if (android && typeof android.openBrowser === 'function') {
-            android.openBrowser(url);
+        if (android) {
+            if (typeof android.openBrowser === 'function') android.openBrowser(url);
+            else Lampa.Noty.show('Трейлер не найден');
             return;
         }
 
@@ -886,13 +886,17 @@
     function openTrailer(card, method) {
         const android = androidJS();
 
-        // openBrowser есть в приложении начиная со сборки 484. В более старых
-        // есть только openYoutube, а он открывает ролик по id, не поиск.
-        if (android && typeof android.openBrowser !== 'function' &&
-            typeof android.openYoutube === 'function') {
+        // На Android отдаём системе ссылку на сам ролик, как это делает Lampa
+        // со своими трейлерами: её открывает приложение YouTube, в том числе
+        // на Android TV, где нет браузера и ссылку на поиск открыть нечем.
+        if (android && typeof android.openYoutube === 'function') {
             tmdbTrailerId(card, method, (id) => {
-                if (id) android.openYoutube(id);
-                else Lampa.Noty.show('Трейлер не найден. Обновите приложение Lampa, чтобы открывался поиск YouTube');
+                if (id) {
+                    console.log('Lampa Random: Opening YouTube video ->', id);
+                    android.openYoutube(id);
+                } else {
+                    englishTitle(card, method, openYoutubeSearch);
+                }
             });
             return;
         }
