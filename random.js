@@ -243,7 +243,7 @@
 
     var manifest = {
         type: 'other',
-        version: '1.2.0',
+        version: '1.2.1',
         name: 'Случайное',
         description: 'Случайный фильм или сериал: кнопки в шапке, экран с фильтрами и кнопка трейлера на YouTube',
         component: 'random_picker'
@@ -849,21 +849,55 @@
         });
     }
 
+    function androidJS() {
+        return typeof AndroidJS !== 'undefined' ? AndroidJS : null;
+    }
+
+    // Трейлер с YouTube из TMDB: сначала английские ролики, потом любые.
+    function tmdbTrailerId(card, method, callback) {
+        const url = Lampa.TMDB.api(method + '/' + card.id + '/videos' +
+            '?api_key=' + Lampa.TMDB.key() + '&include_video_language=en,null,ru');
+
+        new Lampa.Reguest().silent(url, (data) => {
+            const videos = (data.results || []).filter((v) => v.site === 'YouTube' && v.key);
+            const pick = videos.find((v) => v.type === 'Trailer' && v.iso_639_1 === 'en') ||
+                videos.find((v) => v.type === 'Trailer') || videos[0];
+            callback(pick ? pick.key : null);
+        }, () => callback(null));
+    }
+
     function openYoutubeSearch(query) {
         const url = 'https://www.youtube.com/results?search_query=' + encodeURIComponent(query + ' trailer');
         console.log('Lampa Random: Opening YouTube ->', query + ' trailer');
 
-        // В Android-приложении window.open открывает страницу во встроенном
-        // WebView, где у плеера YouTube не работает полноэкранный режим.
+        // В Android-приложении window.open грузит страницу в тот же WebView,
+        // поверх самой Lampa, и полный экран у YouTube там не работает.
         // Отдаём ссылку системе: откроется приложение YouTube или браузер.
-        if (Lampa.Platform.is('android') && typeof AndroidJS !== 'undefined' &&
-            typeof AndroidJS.openBrowser === 'function') {
-            AndroidJS.openBrowser(url);
+        const android = androidJS();
+        if (android && typeof android.openBrowser === 'function') {
+            android.openBrowser(url);
             return;
         }
 
         const opened = window.open(url, '_blank');
         if (!opened) Lampa.Noty.show('Не удалось открыть YouTube');
+    }
+
+    function openTrailer(card, method) {
+        const android = androidJS();
+
+        // openBrowser есть в приложении начиная со сборки 484. В более старых
+        // есть только openYoutube, а он открывает ролик по id, не поиск.
+        if (android && typeof android.openBrowser !== 'function' &&
+            typeof android.openYoutube === 'function') {
+            tmdbTrailerId(card, method, (id) => {
+                if (id) android.openYoutube(id);
+                else Lampa.Noty.show('Трейлер не найден. Обновите приложение Lampa, чтобы открывался поиск YouTube');
+            });
+            return;
+        }
+
+        englishTitle(card, method, openYoutubeSearch);
     }
 
     function addTrailerButton(ctx) {
@@ -872,7 +906,7 @@
             icon: '<svg><use xlink:href="#sprite-youtube"></use></svg>',
             title: 'Трейлер',
             after: '.button--play',
-            onEnter: () => englishTitle(ctx.card, ctx.method, openYoutubeSearch)
+            onEnter: () => openTrailer(ctx.card, ctx.method)
         });
     }
 
